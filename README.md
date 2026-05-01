@@ -14,7 +14,9 @@
 ## Install
 
 ```bash
-pi install path:/path/to/pi-go-bars
+git clone https://github.com/donrami/pi-go-bars.git
+cd pi-go-bars
+pi install path:.
 ```
 
 ## Quick Start
@@ -133,7 +135,9 @@ The live fetch failed but cached data is available. Check your network connectio
 Opencode may have changed their dashboard HTML. Reinstall from source:
 
 ```bash
-pi install path:/path/to/pi-go-bars
+cd /path/to/pi-go-bars
+git pull
+pi install path:.
 ```
 
 If the problem persists, [open an issue](https://github.com/donrami/pi-go-bars/issues).
