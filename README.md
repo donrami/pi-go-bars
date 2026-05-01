@@ -7,17 +7,11 @@
   <a href="https://pi.dev"><img alt="pi extension" src="https://img.shields.io/badge/pi-extension-purple"></a>
 </p>
 
-[pi](https://pi.dev) extension that shows Opencode Go plan usage (rolling / weekly / monthly windows) as a **centred widget line** between the editor and the footer, with percentage values embedded inside colour-coded bars.
+[pi](https://pi.dev) extension that shows Opencode Go plan usage as a widget line between the editor and the footer. Rolling, weekly, and monthly windows are rendered as inline percentage bars using the terminal's muted theme colour.
 
 ![Go usage bars widget screenshot](screenshot.png)
 
 ## Install
-
-```bash
-pi install npm:pi-go-bars
-```
-
-Or install locally from source:
 
 ```bash
 pi install path:/path/to/pi-go-bars
@@ -27,18 +21,16 @@ pi install path:/path/to/pi-go-bars
 
 ### Option 1: Environment Variables (Recommended)
 
-Most secure — credentials never touch disk.
+Credentials stay in memory only.
 
 ```bash
 export OPENCODE_GO_WORKSPACE_ID="wrk_YOUR_WORKSPACE_ID"
 export OPENCODE_GO_AUTH_COOKIE="Fe26.2**YOUR_AUTH_COOKIE"
 ```
 
-Add to your shell profile (`~/.bashrc`, `~/.zshrc`) and run `source ~/.bashrc` (or `~/.zshrc`). Restart pi.
+Add to your shell profile (`~/.bashrc`, `~/.zshrc`), run `source ~/.bashrc` (or `~/.zshrc`), and restart pi.
 
 ### Option 2: JSON Config File
-
-Easiest setup — credentials stored on disk with restricted permissions.
 
 ```bash
 mkdir -p ~/.pi/agent
@@ -55,39 +47,27 @@ Restart pi.
 
 ### Setup Guide
 
-Run the setup guide from within pi:
-
-```
-/gobars-setup
-```
-
-It will walk you through finding your credentials and choosing a config method.
+Run `/gobars-setup` inside pi to display the setup instructions. This prints the same credential and config guidance found below — it does not perform any configuration or initiate an interactive flow.
 
 ## Getting Your Credentials
 
 ### Workspace ID
 
-1. Open [https://opencode.ai](https://opencode.ai) in your browser
-2. Navigate to your Go workspace
-3. Copy the ID from the URL:
+1. Open [https://opencode.ai](https://opencode.ai) and navigate to your Go workspace.
+2. Copy the ID from the URL:
 
 ```
 https://opencode.ai/workspace/wrk_XXXXXXXXXXXXXXXX/go
                               ^^^^^^^^^^^^^^^^^^^^
-                              This is your workspace ID
 ```
 
 ### Auth Cookie
 
-1. Open browser Dev Tools (**F12**)
-2. Go to **Application** → **Storage** → **Cookies** → `opencode.ai`
-3. Find the cookie named `auth`
-4. Copy its value (starts with `Fe26.2**`)
-
+1. Open browser Dev Tools (**F12**).
+2. Go to **Application** → **Storage** → **Cookies** → `opencode.ai`.
+3. Find the cookie named `auth` and copy its value (starts with `Fe26.2**`).
 
 ## Usage
-
-### Widget Line
 
 When configured, a centred widget line appears between the editor and the footer:
 
@@ -95,18 +75,11 @@ When configured, a centred widget line appears between the editor and the footer
          Go  R ██████42%██████  W ██████17%██████  M ████8%██████████
 ```
 
-The widget bars use the theme's **"muted"** colour — no green/yellow/red
-percentage coding. The percentage text is embedded inside the bar as a visual
-"cutout" with bold text on the muted background.
+`R`, `W`, and `M` show rolling (5-hour), weekly (7-day), and monthly (30-day) usage. The percentage text is rendered in bold inside a muted-theme bar as a visual cutout. Reset countdowns (`⟳ 4h`) tick down live on every render.
 
-Bar widths are **dynamic**: they scale to the terminal width (max 20 chars per
-bar, min 3). On narrow terminals, the display **degrades gracefully**: reset
-countdowns are dropped when bars would shrink below 5 chars, and window labels
-are dropped when bars would shrink below 3 chars. Nothing overflows or wraps.
+Bar widths scale with the terminal (max 20 chars, min 3). On narrow terminals the display degrades gracefully: countdowns drop when bars would shrink below 5 chars, then window labels drop below 3 chars. Nothing overflows.
 
-At **0%** no bar segment is drawn; the text appears in muted on dim. At **>0%**
-at least one filled segment is forced so the cutout has room. Reset countdowns
-(`⟳ 4h`) tick down live on every render.
+At **0%** no bar segment is drawn and the text appears dim. At **>0%** at least one filled segment is forced so the cutout has room.
 
 | Symbol | Meaning |
 |---|---|
@@ -115,20 +88,32 @@ at least one filled segment is forced so the cutout has room. Reset countdowns
 | `M` | Monthly usage (30-day window) |
 | `⟳` | Reset countdown |
 
-
-
 ### Commands
 
 | Command | Description |
 |---|---|
 | `/gobars` | Open detail view with full-width 16-char bars for all three windows |
-| `/gobars-setup` | Step-by-step guide for configuring credentials |
+| `/gobars-setup` | Display setup instructions (text only, non-interactive) |
+
+## How It Works
+
+**Display.** The widget is rendered via `ctx.ui.setWidget()` with `placement: "belowEditor"`. This avoids the overflow issues that can occur when `ctx.ui.setStatus()` competes with custom footers.
+
+**Bar rendering.** A `UsageWidget` component recalculates widths on every render from the current terminal dimensions. Percentage text is embedded inside the bar as a bold cutout on the muted background.
+
+**Graceful degradation.** If the terminal is too narrow for the full display, countdowns are hidden first (bars < 5 chars), then window labels (bars < 3 chars).
+
+**Countdowns.** Reset times are adjusted by elapsed time since `fetchedAt` on every render, so they count down live without polling.
+
+**Polling.** Data is fetched every 30 seconds. A 90-second cache TTL means most polls return cached data without a network request. The widget re-renders on every poll tick, `turn_start`, and `model_select`.
+
+**Data source.** The extension scrapes the Opencode Go dashboard (`https://opencode.ai/workspace/{id}/go`) and parses the SolidJS SSR hydration output to extract `rollingUsage`, `weeklyUsage`, and `monthlyUsage` objects containing `usagePercent` and `resetInSec`. This will be replaced by the official API endpoint (`/zen/go/v1/usage`) once it is available (see [opencode#16513](https://github.com/anomalyco/opencode/pull/16513)).
 
 ## Troubleshooting
 
 ### "No config" error
 
-The extension can't find your workspace ID or auth cookie. Run `/gobars-setup` or check that your env variables are set:
+Run `/gobars-setup` to re-read the setup instructions, or verify your environment variables:
 
 ```bash
 echo $OPENCODE_GO_WORKSPACE_ID
@@ -137,61 +122,27 @@ echo $OPENCODE_GO_AUTH_COOKIE
 
 ### "HTTP 401" or "HTTP 403" error
 
-Your auth cookie has expired. Get a fresh cookie from browser Dev Tools and update your config.
+Your auth cookie is likely expired. Copy a fresh cookie from browser Dev Tools and update your config.
 
 ### "stale data" warning
 
-The live fetch failed but cached data is available. Common causes: network issues, expired cookie. The cached data will be shown with a stale badge until the fetch succeeds again.
+The live fetch failed but cached data is available. Check your network connection and cookie freshness. The stale badge disappears once a fetch succeeds.
 
 ### "parser may be outdated" error
 
-Opencode may have changed their dashboard HTML structure. Update this package:
+Opencode may have changed their dashboard HTML. Reinstall from source:
 
 ```bash
-pi install npm:pi-go-bars  # reinstall latest version
+pi install path:/path/to/pi-go-bars
 ```
 
 If the problem persists, [open an issue](https://github.com/donrami/pi-go-bars/issues).
 
 ### Widget line doesn't appear
 
-1. Make sure the extension is installed: `pi list`
-2. Run `/gobars` to manually trigger a fetch and render
-3. If using print mode (`-p`) or RPC mode, widgets aren't rendered — use interactive mode
-4. Check pi's logs for extension errors
-
-## How It Works
-
-**Display:** Uses `ctx.ui.setWidget()` with `placement: "belowEditor"` to render
-a dedicated line between the editor and the footer. This avoids overflow issues
-that occur when using `ctx.ui.setStatus()` with custom single-line footers like
-powerline-footer.
-
-**Bar rendering:** A `UsageWidget` component recalculates bar widths on every
-render from the current terminal width (max 20 chars per bar, min 3). Bars use
-the theme's **"muted"** colour — no green/yellow/red coding. The percentage text
-is embedded inside the bar with bold text on the muted background. At 0% no bar
-segment is drawn; at >0% at least one filled `█` is forced so the cutout has
-room.
-
-**Graceful degradation:** On narrow terminals, reset countdowns are dropped when
-bars would shrink below 5 chars per window; window labels are dropped when bars
-would shrink below 3 chars. Nothing overflows or wraps.
-
-**Countdowns:** Reset times (`⟳ 4h`) are adjusted by elapsed time since
-`fetchedAt` on every render, so they tick down live.
-
-**Polling:** Fetches data every 30 seconds. A 90-second cache TTL means most
-polls return cached data without a network request. The widget re-renders on
-every poll tick, every `turn_start`, and every `model_select`.
-
-**Data source:** Scrapes the Opencode Go dashboard at
-`https://opencode.ai/workspace/{id}/go` and parses the SolidJS SSR hydration
-output to extract `rollingUsage`, `weeklyUsage`, and `monthlyUsage` objects
-containing `usagePercent` and `resetInSec`.
-
-This approach is used until the official API endpoint (`/zen/go/v1/usage`) is
-merged (see [opencode#16513](https://github.com/anomalyco/opencode/pull/16513)).
+1. Run `/gobars` to manually trigger a fetch.
+2. Widgets are only rendered in interactive mode. They won't appear in print (`-p`) or RPC mode.
+3. Check pi's logs for extension errors.
 
 ## License
 
