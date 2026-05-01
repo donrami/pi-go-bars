@@ -22,11 +22,32 @@ import {
   clampPercent,
   fetchWithCache,
   formatDuration,
+  logError,
   renderBar,
   renderPercent,
   type GoUsageData,
 } from "./core";
 import { renderSetupGuide } from "./setup";
+
+// ─── ANSI helpers ────────────────────────────────────────────────────────────
+
+/**
+ * Convert a foreground ANSI escape code to its background equivalent.
+ * Handles 256-color (\x1b[38;5;Nm), truecolor (\x1b[38;2;R;G;Bm),
+ * and falls back to simple [38→[48 replacement for basic 16-color codes.
+ */
+function fgToBgAnsi(fgAnsi: string): string {
+  // Handle 256-color: \x1b[38;5;Nm  →  \x1b[48;5;Nm
+  const m256 = fgAnsi.match(/\x1b\[38;5;(\d+)m/);
+  if (m256) return `\x1b[48;5;${m256[1]}m`;
+
+  // Handle truecolor: \x1b[38;2;R;G;Bm  →  \x1b[48;2;R;G;Bm
+  const mTrue = fgAnsi.match(/\x1b\[38;2;(\d+);(\d+);(\d+)m/);
+  if (mTrue) return `\x1b[48;2;${mTrue[1]};${mTrue[2]};${mTrue[3]}m`;
+
+  // Fallback: simple 16-color replacement
+  return fgAnsi.replace("[38", "[48");
+}
 
 const POLL_INTERVAL_MS = 30 * 1000;
 const STATUS_KEY = "pi-go-bars";
@@ -54,7 +75,7 @@ export default function (pi: ExtensionAPI) {
     do {
       pollQueued = false;
       pollInFlight = runPoll()
-        .catch(() => {})
+        .catch((err) => { logError("poll:runPoll", err); })
         .finally(() => { pollInFlight = null; state.loading = false; });
       await pollInFlight;
     } while (pollQueued);
@@ -64,6 +85,86 @@ export default function (pi: ExtensionAPI) {
 
   let uiCtx: any = null;
   let uiTheme: any = null;
+
+  // ─── Pure layout helpers ───────────────────────────────────────────────────
+
+  interface Win {
+    label: string;
+    pct: number;
+    resetSec: number;
+  }
+
+  interface Layout {
+    showLabels: boolean;
+    showResets: boolean;
+    barSlots: number;
+  }
+
+  function calculateLayout(width: number, wins: Win[], staleWidth: number): Layout {
+    const MIN_BAR = 3;
+    const MAX_BAR = 20;
+
+    // Try with resets
+    let fixed = "Go".length;
+    let showLabels = true;
+    let showResets = true;
+    for (const w of wins) {
+      fixed += 1 + w.label.length + 1;
+      if (w.resetSec > 0) fixed += 3 + visibleWidth(formatDuration(w.resetSec));
+    }
+    fixed += staleWidth;
+
+    let barSlots = wins.length > 0
+      ? Math.min(MAX_BAR, Math.floor((width - fixed) / wins.length))
+      : 0;
+
+    if (barSlots < 5) {
+      showResets = false;
+      fixed = "Go".length;
+      for (const w of wins) fixed += 1 + w.label.length + 1;
+      fixed += staleWidth;
+      barSlots = wins.length > 0
+        ? Math.min(MAX_BAR, Math.floor((width - fixed) / wins.length))
+        : 0;
+    }
+
+    if (barSlots < MIN_BAR) {
+      showLabels = false;
+      fixed = "Go".length;
+      fixed += staleWidth;
+      barSlots = wins.length > 0
+        ? Math.min(MAX_BAR, Math.floor((width - fixed) / wins.length))
+        : 0;
+    }
+
+    barSlots = Math.max(MIN_BAR, barSlots);
+
+    return { showLabels, showResets, barSlots };
+  }
+
+  function renderBarSegment(t: any, w: Win, barSlots: number): string {
+    const barCol = "muted";
+    const barBg = fgToBgAnsi(t.getFgAnsi(barCol));
+    const v = clampPercent(w.pct);
+    const label = v + "%";
+    const lw = label.length;
+    const bw = barSlots;
+
+    if (v === 0) {
+      return t.fg(barCol, label) + t.fg("dim", "\u2591".repeat(Math.max(0, bw - lw)));
+    }
+
+    const filled = Math.max(1, Math.round((v / 100) * bw));
+    const before = Math.max(0, Math.min(filled, Math.floor((filled - lw) / 2)));
+    const after = Math.max(0, filled - before - lw);
+    const empty = Math.max(0, bw - before - lw - after);
+    return (
+      t.fg(barCol, "\u2588".repeat(before)) +
+      barBg + t.bold(label) + "\x1b[39m\x1b[49m" +
+      t.fg(barCol, "\u2588".repeat(after)) +
+      t.fg("dim", "\u2591".repeat(empty))
+    );
+  }
 
   /** Responsive widget — bar widths are recalculated on every render() call
    *  so they scale with terminal width instead of overflowing. */
@@ -85,85 +186,18 @@ export default function (pi: ExtensionAPI) {
       const staleSuffix = data.stale ? t.fg("warning", " stale") : "";
       const elapsed = data.fetchedAt ? Math.floor((Date.now() - data.fetchedAt) / 1000) : 0;
 
-      type Win = { label: string; pct: number; resetSec: number };
       const wins: Win[] = [];
       if (data.rolling) wins.push({ label: "R", pct: data.rolling.usagePercent, resetSec: Math.max(0, data.rolling.resetInSec - elapsed) });
       if (data.weekly) wins.push({ label: "W", pct: data.weekly.usagePercent, resetSec: Math.max(0, data.weekly.resetInSec - elapsed) });
       if (data.monthly) wins.push({ label: "M", pct: data.monthly.usagePercent, resetSec: Math.max(0, data.monthly.resetInSec - elapsed) });
 
-      // Graceful degradation: on narrow terminals, drop less important info.
-      // 1) full info (prefix + labels + resets + bars)
-      // 2) if bars < 5 chars: drop resets
-      // 3) if bars < 3 chars: also drop labels
-
-      const MIN_BAR = 3;
-      const MAX_BAR = 20;
-
-      //── Try with resets ────────────────────────────────────────────────────
-      let fixed = "Go".length;
-      let showLabels = true;
-      let showResets = true;
-      for (const w of wins) {
-        fixed += 1 + w.label.length + 1;
-        if (w.resetSec > 0) fixed += 3 + visibleWidth(formatDuration(w.resetSec));
-      }
-      fixed += staleSuffix ? visibleWidth(staleSuffix) : 0;
-
-      let barSlots = wins.length > 0
-        ? Math.min(MAX_BAR, Math.floor((width - fixed) / wins.length))
-        : 0;
-
-      if (barSlots < 5) {
-        //── Tight — drop resets ────────────────────────────────────────────
-        showResets = false;
-        fixed = "Go".length;
-        for (const w of wins) fixed += 1 + w.label.length + 1;
-        fixed += staleSuffix ? visibleWidth(staleSuffix) : 0;
-        barSlots = wins.length > 0
-          ? Math.min(MAX_BAR, Math.floor((width - fixed) / wins.length))
-          : 0;
-      }
-
-      if (barSlots < MIN_BAR) {
-        //── Very tight — drop labels too ──────────────────────────────────
-        showLabels = false;
-        fixed = "Go".length;
-        fixed += staleSuffix ? visibleWidth(staleSuffix) : 0;
-        barSlots = wins.length > 0
-          ? Math.min(MAX_BAR, Math.floor((width - fixed) / wins.length))
-          : 0;
-      }
-
-      barSlots = Math.max(MIN_BAR, barSlots);
-
-      const barCol = "muted";
-      const barBg = t.getFgAnsi(barCol).replace("[38", "[48");
+      const layout = calculateLayout(width, wins, visibleWidth(staleSuffix));
       const parts: string[] = [t.fg("dim", "Go")];
 
       for (const w of wins) {
-        if (showLabels) parts.push(t.fg("muted", " " + w.label + " "));
-
-        const v = clampPercent(w.pct);
-        const label = v + "%";
-        const lw = label.length;
-        const bw = barSlots;
-
-        if (v === 0) {
-          parts.push(t.fg(barCol, label) + t.fg("dim", "\u2591".repeat(Math.max(0, bw - lw))));
-        } else {
-          const filled = Math.max(1, Math.round((v / 100) * bw));
-          const before = Math.max(0, Math.min(filled, Math.floor((filled - lw) / 2)));
-          const after = Math.max(0, filled - before - lw);
-          const empty = Math.max(0, bw - before - lw - after);
-          parts.push(
-            t.fg(barCol, "\u2588".repeat(before)) +
-            barBg + t.bold(label) + "\x1b[39m\x1b[49m" +
-            t.fg(barCol, "\u2588".repeat(after)) +
-            t.fg("dim", "\u2591".repeat(empty)),
-          );
-        }
-
-        if (showResets && w.resetSec > 0)
+        if (layout.showLabels) parts.push(t.fg("muted", " " + w.label + " "));
+        parts.push(renderBarSegment(t, w, layout.barSlots));
+        if (layout.showResets && w.resetSec > 0)
           parts.push(t.fg("dim", " \u27F3 " + formatDuration(w.resetSec)));
       }
 
@@ -185,7 +219,7 @@ export default function (pi: ExtensionAPI) {
   // ─── Lifecycle ─────────────────────────────────────────────────────────────
 
   pi.on("session_start", async (_event, _ctx) => {
-    try { uiCtx = _ctx.ui; uiTheme = _ctx.ui.theme; } catch { return; }
+    try { uiCtx = _ctx.ui; uiTheme = _ctx.ui.theme; } catch (err) { logError("lifecycle:session_start", err); return; }
     renderWidget();
     await poll();
     renderWidget();
@@ -194,19 +228,19 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("turn_start", async (_event, _ctx) => {
-    try { uiCtx = _ctx.ui; uiTheme = _ctx.ui.theme; } catch { return; }
+    try { uiCtx = _ctx.ui; uiTheme = _ctx.ui.theme; } catch (err) { logError("lifecycle:turn_start", err); return; }
     renderWidget();
   });
 
   pi.on("model_select", async (_event, _ctx) => {
-    try { uiCtx = _ctx.ui; uiTheme = _ctx.ui.theme; } catch { return; }
+    try { uiCtx = _ctx.ui; uiTheme = _ctx.ui.theme; } catch (err) { logError("lifecycle:model_select", err); return; }
     if (!state.data || state.loading) await poll();
     renderWidget();
   });
 
   pi.on("session_shutdown", async (_event, _ctx) => {
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-    try { uiCtx?.setWidget(STATUS_KEY, undefined); } catch {}
+    try { uiCtx?.setWidget(STATUS_KEY, undefined); } catch (err) { logError("lifecycle:session_shutdown", err); }
   });
 
   // ─── Commands ──────────────────────────────────────────────────────────────
@@ -220,7 +254,7 @@ export default function (pi: ExtensionAPI) {
             buildUsageDetail(theme, state.data, done),
           );
         }
-      } catch {}
+      } catch (err) { logError("command:gobars", err); }
       await poll();
       renderWidget();
     },
@@ -235,7 +269,7 @@ export default function (pi: ExtensionAPI) {
             renderSetupGuide(tui, theme, done),
           );
         }
-      } catch {}
+      } catch (err) { logError("command:gobars-setup", err); }
     },
   });
 }

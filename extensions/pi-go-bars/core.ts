@@ -14,6 +14,26 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 
+// ─── Logger ──────────────────────────────────────────────────────────────────
+
+const LOG_FILE = path.join(os.tmpdir(), "pi", "pi-go-bars.log");
+
+/**
+ * Append a timestamped error entry to the extension log file.
+ * Silently ignores logger failures (last resort).
+ */
+export function logError(context: string, err: unknown): void {
+  try {
+    const dir = path.dirname(LOG_FILE);
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const ts = new Date().toISOString();
+    const msg = err instanceof Error ? err.message : String(err);
+    fs.appendFileSync(LOG_FILE, `[${ts}] [${context}] ${msg}\n`, { flag: "a" });
+  } catch {
+    // last-resort silent fail
+  }
+}
+
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 export interface GoUsageWindow {
@@ -45,9 +65,17 @@ export interface GoBarsConfig {
   authCookie: string;
 }
 
+function isString(val: unknown): val is string {
+  return typeof val === "string";
+}
+
 /**
  * Parse a .env file and extract workspace credentials.
  * Supports KEY=value and KEY="value" formats. Zero dependencies.
+ *
+ * LIMITATION: Does NOT handle escaped quotes (\") or inline comments.
+ * This is acceptable for the expected credential format but may misparse
+ * general .env files.
  */
 export function loadEnvFile(filePath: string): GoBarsConfig | null {
   try {
@@ -84,8 +112,8 @@ export function loadEnvFile(filePath: string): GoBarsConfig | null {
     if (workspaceId && authCookie) {
       return { workspaceId, authCookie } as GoBarsConfig;
     }
-  } catch {
-    // ignore (file not found, permission, etc.)
+  } catch (err) {
+    logError("config:loadEnvFile", err);
   }
   return null;
 }
@@ -110,11 +138,11 @@ export function loadConfig(configFile = DEFAULT_CONFIG_FILE): GoBarsConfig | nul
   try {
     const raw = fs.readFileSync(configFile, "utf-8");
     const parsed = JSON.parse(raw) as Record<string, unknown>;
-    const ws = (parsed.workspaceId as string)?.trim() || (parsed.opencodeGoWorkspaceId as string)?.trim();
-    const cookie = (parsed.authCookie as string)?.trim() || (parsed.opencodeGoAuthCookie as string)?.trim();
+    const ws = isString(parsed.workspaceId) ? parsed.workspaceId.trim() : "";
+    const cookie = isString(parsed.authCookie) ? parsed.authCookie.trim() : "";
     if (ws && cookie) return { workspaceId: ws, authCookie: cookie } as GoBarsConfig;
-  } catch {
-    // ignore
+  } catch (err) {
+    logError("config:loadJson", err);
   }
 
   // 3) Legacy: opencode-go-usage plugin config
@@ -126,14 +154,13 @@ export function loadConfig(configFile = DEFAULT_CONFIG_FILE): GoBarsConfig | nul
     try {
       const raw = fs.readFileSync(lp, "utf-8");
       const parsed = JSON.parse(raw) as Record<string, unknown>;
-      if (parsed.workspaceId && parsed.authCookie) {
-        return {
-          workspaceId: String(parsed.workspaceId).trim(),
-          authCookie: String(parsed.authCookie).trim(),
-        } as GoBarsConfig;
+      const ws = isString(parsed.workspaceId) ? parsed.workspaceId.trim() : "";
+      const cookie = isString(parsed.authCookie) ? parsed.authCookie.trim() : "";
+      if (ws && cookie) {
+        return { workspaceId: ws, authCookie: cookie } as GoBarsConfig;
       }
-    } catch {
-      // ignore
+    } catch (err) {
+      logError("config:loadJson", err);
     }
   }
 
@@ -147,13 +174,14 @@ export function loadConfig(configFile = DEFAULT_CONFIG_FILE): GoBarsConfig | nul
 export function writeConfig(config: GoBarsConfig, configFile = DEFAULT_CONFIG_FILE): boolean {
   try {
     const dir = path.dirname(configFile);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     const tmp = `${configFile}.tmp-${process.pid}`;
     fs.writeFileSync(tmp, JSON.stringify(config, null, 2));
     fs.chmodSync(tmp, 0o600);
     fs.renameSync(tmp, configFile);
     return true;
-  } catch {
+  } catch (err) {
+    logError("config:write", err);
     return false;
   }
 }
@@ -162,8 +190,8 @@ export function writeConfig(config: GoBarsConfig, configFile = DEFAULT_CONFIG_FI
 
 /**
  * Cache TTL: 1.5 minutes.
- * Polling interval is 2 minutes, so cache expires before the next poll.
- * Cache only guards concurrent/duplicate requests.
+ * Polling interval is 30 seconds, so 2 of 3 polls hit cached data
+ * without a network request. Cache also guards concurrent/duplicate requests.
  */
 const CACHE_TTL_MS = 90 * 1000;
 const CACHE_FILE = path.join(os.tmpdir(), "pi", "pi-go-bars-cache.json");
@@ -178,8 +206,8 @@ function readCache(): CacheEntry | null {
     const raw = fs.readFileSync(CACHE_FILE, "utf-8");
     const entry = JSON.parse(raw) as CacheEntry;
     if (entry?.data && typeof entry.ts === "number") return entry;
-  } catch {
-    // ignore
+  } catch (err) {
+    logError("cache:read", err);
   }
   return null;
 }
@@ -187,12 +215,13 @@ function readCache(): CacheEntry | null {
 function writeCache(data: GoUsageData): void {
   try {
     const dir = path.dirname(CACHE_FILE);
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     const tmp = `${CACHE_FILE}.tmp-${process.pid}`;
     fs.writeFileSync(tmp, JSON.stringify({ data, ts: Date.now() }));
+    fs.chmodSync(tmp, 0o600);
     fs.renameSync(tmp, CACHE_FILE);
-  } catch {
-    // ignore
+  } catch (err) {
+    logError("cache:write", err);
   }
 }
 
@@ -247,12 +276,12 @@ function parseWindow(
 }
 
 /**
- * Check if the HTML looks like a valid dashboard response.
+ * Check if HTML contains dashboard-specific SSR hydration data.
  * Used to detect silent regex failures when SSR format changes.
+ * Does NOT check for broad keywords that could match a login page.
  */
 function looksLikeDashboard(html: string): boolean {
-  const lower = html.toLowerCase();
-  return lower.includes("opencode") || lower.includes("workspace");
+  return html.includes("rollingUsage") || html.includes("weeklyUsage") || html.includes("monthlyUsage");
 }
 
 export function parseDashboard(html: string): GoUsageData {
@@ -293,6 +322,12 @@ export async function fetchUsage(config: GoBarsConfig): Promise<GoUsageData> {
       throw new Error(`HTTP ${resp.status} ${resp.statusText}`);
     }
 
+    // Guard against redirect-to-login: the final URL must contain the workspace path
+    const finalUrl = resp.url;
+    if (!finalUrl.includes(`/workspace/${config.workspaceId}/go`)) {
+      throw new Error("Session expired or auth invalid — refresh your cookie");
+    }
+
     const html = await resp.text();
     return parseDashboard(html);
   } finally {
@@ -300,7 +335,21 @@ export async function fetchUsage(config: GoBarsConfig): Promise<GoUsageData> {
   }
 }
 
-/** Orchestrated: config → cache → fetch → persist */
+// ─── Validation ──────────────────────────────────────────────────────────────
+
+function validateConfig(config: GoBarsConfig): string | null {
+  if (!/^wrk_[A-Za-z0-9]+$/.test(config.workspaceId)) {
+    return `Invalid workspaceId format: expected "wrk_...", got "${config.workspaceId}"`;
+  }
+  if (!config.authCookie.startsWith("Fe26.2**")) {
+    return `Invalid authCookie format: expected "Fe26.2**...", got "${config.authCookie.slice(0, 10)}..."`;
+  }
+  return null;
+}
+
+// ─── Orchestrator ────────────────────────────────────────────────────────────
+
+/** Orchestrated: config → validation → cache → fetch → persist */
 export async function fetchWithCache(): Promise<GoUsageData> {
   const cfg = loadConfig();
   if (!cfg) {
@@ -309,6 +358,17 @@ export async function fetchWithCache(): Promise<GoUsageData> {
       weekly: null,
       monthly: null,
       error: "No config — create a .env file or run /gobars-setup",
+    };
+  }
+
+  // Validate config
+  const validationError = validateConfig(cfg);
+  if (validationError) {
+    return {
+      rolling: null,
+      weekly: null,
+      monthly: null,
+      error: validationError,
     };
   }
 

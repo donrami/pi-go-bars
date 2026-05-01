@@ -51,6 +51,15 @@ Restart pi.
 
 Run `/gobars-setup` inside pi to display the setup instructions. This prints the same credential and config guidance found below — it does not perform any configuration or initiate an interactive flow.
 
+### Migration from opencode-go-usage
+
+If you previously used the `opencode-go-usage` plugin, pi-go-bars will
+automatically read your existing config from:
+- `~/.config/opencode/opencode-go-usage.json`
+- `~/.opencode/opencode-go-usage.json`
+
+To migrate permanently, run `/gobars-setup` and choose the persistent JSON option.
+
 ## Getting Your Credentials
 
 ### Workspace ID
@@ -147,6 +156,25 @@ If the problem persists, [open an issue](https://github.com/donrami/pi-go-bars/i
 1. Run `/gobars` to manually trigger a fetch.
 2. Widgets are only rendered in interactive mode. They won't appear in print (`-p`) or RPC mode.
 3. Check pi's logs for extension errors.
+
+## Programmatic Usage
+
+If you are building another pi extension, you can import utilities from `pi-go-bars`:
+
+```ts
+import { clampPercent, renderBar } from "pi-go-bars/extensions/pi-go-bars/core";
+```
+
+The following helpers are exported from `core.ts` for stable reuse:
+
+| Function | Purpose |
+|---|---|
+| `clampPercent(value)` | Clamp to 0–100 and round |
+| `colorForPercent(value)` | Returns `"success"`, `"warning"`, or `"error"` |
+| `renderBar(theme, value, width?)` | Colored bar string |
+| `renderPercent(theme, value)` | Colored percent string |
+| `formatDuration(seconds)` | Human-readable countdown |
+| `writeConfig(config, path?)` | Atomic config write with `chmod 600` |
 
 ## License
 
