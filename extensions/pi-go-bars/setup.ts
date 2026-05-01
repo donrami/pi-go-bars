@@ -1,5 +1,5 @@
 /**
- * /gobars-setup — Interactive guide for configuring Opencode Go usage bars.
+ * /gobars-setup — Setup guide for configuring Opencode Go usage bars.
  *
  * Pure guide only: explains how to find credentials, offers config choices.
  * Does NOT fetch or verify credentials.

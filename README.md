@@ -53,7 +53,7 @@ chmod 600 ~/.pi/agent/pi-go-bars.json
 
 Restart pi.
 
-### Interactive Setup
+### Setup Guide
 
 Run the setup guide from within pi:
 
@@ -122,7 +122,7 @@ at least one filled segment is forced so the cutout has room. Reset countdowns
 | Command | Description |
 |---|---|
 | `/gobars` | Open detail view with full-width 16-char bars for all three windows |
-| `/gobars-setup` | Interactive guide for configuring credentials |
+| `/gobars-setup` | Step-by-step guide for configuring credentials |
 
 ## Troubleshooting
 
