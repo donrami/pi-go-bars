@@ -84,7 +84,6 @@ https://opencode.ai/workspace/wrk_XXXXXXXXXXXXXXXX/go
 3. Find the cookie named `auth`
 4. Copy its value (starts with `Fe26.2**`)
 
-![Screenshot placeholder](https://via.placeholder.com/600x200?text=Browser+DevTools+→+Cookies+→+auth)
 
 ## Usage
 
