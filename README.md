@@ -77,11 +77,11 @@ When configured, a centred widget line appears between the editor and the footer
          Go  R ██████42%██████  W ██████17%██████  M ████8%██████████
 ```
 
-`R`, `W`, and `M` show rolling (5-hour), weekly (7-day), and monthly (30-day) usage. The percentage text is rendered in bold inside a muted-theme bar as a visual cutout. Reset countdowns (`⟳ 4h`) tick down live on every render.
+`R`, `W`, and `M` show rolling (5-hour), weekly (7-day), and monthly (30-day) usage. Percentages render in bold inside muted-theme bars. Reset countdowns (`⟳ 4h`) tick down live on every render.
 
 Bar widths scale with the terminal (max 20 chars, min 3). On narrow terminals the display degrades gracefully: countdowns drop when bars would shrink below 5 chars, then window labels drop below 3 chars. Nothing overflows.
 
-At **0%** no bar segment is drawn and the text appears dim. At **>0%** at least one filled segment is forced so the cutout has room.
+At **0%** no bar segment is drawn and the text appears dim.
 
 | Symbol | Meaning |
 |---|---|
