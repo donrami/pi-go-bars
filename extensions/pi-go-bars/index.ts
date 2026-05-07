@@ -2,9 +2,8 @@
  * Pi Go Bars — pi Extension
  *
  * Shows rolling, weekly, and monthly usage for the Opencode Go plan
- * as a centred widget line between the editor and the footer, using
- * ctx.ui.setWidget() with placement "belowEditor".  Bars scale
- * dynamically to terminal width.
+ * centred in the footer between token stats and model info, via
+ * ctx.ui.setFooter().  Bars scale dynamically to terminal width.
  *
  * Config: OPENCODE_GO_WORKSPACE_ID + OPENCODE_GO_AUTH_COOKIE env vars,
  * or ~/.pi/agent/pi-go-bars.json
@@ -14,6 +13,7 @@ import { type ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import {
   Container,
   Text,
+  truncateToWidth,
   visibleWidth,
   type Component,
   type Focusable,
@@ -31,26 +31,15 @@ import { renderSetupGuide } from "./setup";
 
 // ─── ANSI helpers ────────────────────────────────────────────────────────────
 
-/**
- * Convert a foreground ANSI escape code to its background equivalent.
- * Handles 256-color (\x1b[38;5;Nm), truecolor (\x1b[38;2;R;G;Bm),
- * and falls back to simple [38→[48 replacement for basic 16-color codes.
- */
 function fgToBgAnsi(fgAnsi: string): string {
-  // Handle 256-color: \x1b[38;5;Nm  →  \x1b[48;5;Nm
   const m256 = fgAnsi.match(/\x1b\[38;5;(\d+)m/);
   if (m256) return `\x1b[48;5;${m256[1]}m`;
-
-  // Handle truecolor: \x1b[38;2;R;G;Bm  →  \x1b[48;2;R;G;Bm
   const mTrue = fgAnsi.match(/\x1b\[38;2;(\d+);(\d+);(\d+)m/);
   if (mTrue) return `\x1b[48;2;${mTrue[1]};${mTrue[2]};${mTrue[3]}m`;
-
-  // Fallback: simple 16-color replacement
   return fgAnsi.replace("[38", "[48");
 }
 
 const POLL_INTERVAL_MS = 30 * 1000;
-const STATUS_KEY = "pi-go-bars";
 
 function isGoModel(model: { provider: string } | undefined | null): boolean {
   return model?.provider === "opencode-go";
@@ -85,12 +74,27 @@ export default function (pi: ExtensionAPI) {
     } while (pollQueued);
   }
 
-  // ─── Widget Rendering ─────────────────────────────────────────────────────
+  // ─── Footer state ──────────────────────────────────────────────────────────
 
   let uiCtx: any = null;
   let uiTheme: any = null;
+  let tuiRef: any = null;
+  let thinkingLevel = "off";
+  let footerActive = false;
 
-  // ─── Pure layout helpers ───────────────────────────────────────────────────
+  function formatTokens(count: number): string {
+    if (count < 1000) return count.toString();
+    if (count < 10000) return `${(count / 1000).toFixed(1)}k`;
+    if (count < 1000000) return `${Math.round(count / 1000)}k`;
+    if (count < 10000000) return `${(count / 1000000).toFixed(1)}M`;
+    return `${Math.round(count / 1000000)}M`;
+  }
+
+  function stripAnsi(s: string): string {
+    return s.replace(/\x1b\[[0-9;]*m/g, "");
+  }
+
+  // ─── Pure layout helpers (used by footer bars and detail view) ─────────────
 
   interface Win {
     label: string;
@@ -108,7 +112,6 @@ export default function (pi: ExtensionAPI) {
     const MIN_BAR = 3;
     const MAX_BAR = 20;
 
-    // Try with resets
     let fixed = "Go".length;
     let showLabels = true;
     let showResets = true;
@@ -142,7 +145,6 @@ export default function (pi: ExtensionAPI) {
     }
 
     barSlots = Math.max(MIN_BAR, barSlots);
-
     return { showLabels, showResets, barSlots };
   }
 
@@ -170,8 +172,196 @@ export default function (pi: ExtensionAPI) {
     );
   }
 
-  /** Responsive widget — bar widths are recalculated on every render() call
-   *  so they scale with terminal width instead of overflowing. */
+  // ─── Footer bar renderer ───────────────────────────────────────────────────
+
+  /** Build a compact bar string that fits within maxWidth (returns "" if too narrow). */
+  function renderFooterBars(t: any, data: GoUsageData | null, loading: boolean, maxWidth: number): string {
+    if (loading) {
+      return visibleWidth(t.fg("dim", "Go loading...")) <= maxWidth
+        ? t.fg("dim", "Go loading...") : "";
+    }
+    if (!data || data.error) return "";
+
+    const staleSuffix = data.stale ? t.fg("warning", " stale") : "";
+    const elapsed = data.fetchedAt ? Math.floor((Date.now() - data.fetchedAt) / 1000) : 0;
+
+    const wins: Win[] = [];
+    if (data.rolling) wins.push({ label: "R", pct: data.rolling.usagePercent, resetSec: Math.max(0, data.rolling.resetInSec - elapsed) });
+    if (data.weekly) wins.push({ label: "W", pct: data.weekly.usagePercent, resetSec: Math.max(0, data.weekly.resetInSec - elapsed) });
+    if (data.monthly) wins.push({ label: "M", pct: data.monthly.usagePercent, resetSec: Math.max(0, data.monthly.resetInSec - elapsed) });
+
+    if (wins.length === 0) return "";
+
+    const staleW = visibleWidth(staleSuffix);
+
+    // Determine minimum viable layout
+    let barSlots = 4;
+    let showLabels = false;
+    let showResets = false;
+
+    const bareWidth = visibleWidth("Go") + wins.length * (1 + 4) + staleW; // "Go" + " " + 4-char bar per window
+    if (bareWidth > maxWidth) return "";
+
+    // Try labels + resets, then labels only, then bare
+    const withLabelsResets = visibleWidth("Go") +
+      wins.reduce((s, w) => s + 1 + w.label.length + 1 + 4 + (w.resetSec > 0 ? 3 + visibleWidth(formatDuration(w.resetSec)) : 0), 0) + staleW;
+    const withLabels = visibleWidth("Go") +
+      wins.reduce((s, w) => s + 1 + w.label.length + 1 + 4, 0) + staleW;
+
+    if (withLabelsResets <= maxWidth) { showLabels = true; showResets = true; barSlots = 4; }
+    else if (withLabels <= maxWidth) { showLabels = true; barSlots = 4; }
+    else { barSlots = 4; }
+
+    // Expand bars to fill remaining space
+    let used = visibleWidth("Go");
+    for (const w of wins) {
+      used += showLabels ? 1 + w.label.length + 1 : 1;
+      used += barSlots;
+      if (showResets && w.resetSec > 0) used += 3 + visibleWidth(formatDuration(w.resetSec));
+    }
+    used += staleW;
+    const remaining = Math.max(0, maxWidth - used);
+    const extraPerBar = wins.length > 0 ? Math.floor(remaining / wins.length) : 0;
+    barSlots = Math.min(20, barSlots + extraPerBar);
+
+    const parts: string[] = [t.fg("dim", "Go")];
+    for (const w of wins) {
+      if (showLabels) parts.push(t.fg("muted", " " + w.label + " "));
+      else parts.push(" ");
+      parts.push(renderBarSegment(t, w, barSlots));
+      if (showResets && w.resetSec > 0)
+        parts.push(t.fg("dim", " \u27F3 " + formatDuration(w.resetSec)));
+    }
+    return parts.join("") + staleSuffix;
+  }
+
+  // ─── Footer setup ──────────────────────────────────────────────────────────
+
+  function setupFooter(ctx: any) {
+    if (!ctx.ui) return;
+    ctx.ui.setFooter((tui: any, theme: any, footerData: any) => {
+      tuiRef = tui;
+      const unsub = footerData.onBranchChange(() => tui.requestRender());
+
+      return {
+        dispose: unsub,
+        invalidate() {},
+        render(width: number): string[] {
+          // ── Line 1: cwd ──────────────────────────────────────────────────
+          let pwd = ctx.sessionManager.getCwd();
+          const home = process.env.HOME || process.env.USERPROFILE;
+          if (home && pwd.startsWith(home)) pwd = `~${pwd.slice(home.length)}`;
+          const branch = footerData.getGitBranch();
+          if (branch) pwd = `${pwd} (${branch})`;
+          const sessionName = ctx.sessionManager.getSessionName();
+          if (sessionName) pwd = `${pwd} • ${sessionName}`;
+          const pwdLine = truncateToWidth(theme.fg("dim", pwd), width, theme.fg("dim", "..."));
+
+          // ── Line 2: stats + bars + model ─────────────────────────────────
+          let totalInput = 0, totalOutput = 0, totalCacheRead = 0, totalCacheWrite = 0, totalCost = 0;
+          for (const entry of ctx.sessionManager.getEntries()) {
+            if (entry.type === "message" && entry.message.role === "assistant") {
+              totalInput += entry.message.usage.input;
+              totalOutput += entry.message.usage.output;
+              totalCacheRead += entry.message.usage.cacheRead;
+              totalCacheWrite += entry.message.usage.cacheWrite;
+              totalCost += entry.message.usage.cost.total;
+            }
+          }
+
+          const contextUsage = ctx.getContextUsage();
+          const contextWindow = contextUsage?.contextWindow ?? ctx.model?.contextWindow ?? 0;
+          const contextPercentValue = contextUsage?.percent ?? 0;
+          const contextPercent = contextUsage?.percent !== null ? contextPercentValue.toFixed(1) : "?";
+
+          const statsParts: string[] = [];
+          if (totalInput) statsParts.push(`↑${formatTokens(totalInput)}`);
+          if (totalOutput) statsParts.push(`↓${formatTokens(totalOutput)}`);
+          if (totalCacheRead) statsParts.push(`R${formatTokens(totalCacheRead)}`);
+          if (totalCacheWrite) statsParts.push(`W${formatTokens(totalCacheWrite)}`);
+          let usingSubscription = false;
+          try { usingSubscription = ctx.model ? ctx.modelRegistry.isUsingOAuth(ctx.model) : false; } catch { /* ignore */ }
+          if (totalCost || usingSubscription) {
+            statsParts.push(`$${totalCost.toFixed(3)}${usingSubscription ? " (sub)" : ""}`);
+          }
+
+          let contextPercentStr: string;
+          const contextPercentDisplay = contextPercent === "?"
+            ? `?/${formatTokens(contextWindow)}`
+            : `${contextPercent}%/${formatTokens(contextWindow)}`;
+          if (contextPercentValue > 90) contextPercentStr = theme.fg("error", contextPercentDisplay);
+          else if (contextPercentValue > 70) contextPercentStr = theme.fg("warning", contextPercentDisplay);
+          else contextPercentStr = contextPercentDisplay;
+          statsParts.push(contextPercentStr);
+          const statsLeft = statsParts.join(" ");
+
+          // Model right
+          const model = ctx.model;
+          let rightSide = model?.id || "no-model";
+          if (model?.reasoning) {
+            const level = thinkingLevel || "off";
+            rightSide = level === "off" ? `${rightSide} • thinking off` : `${rightSide} • ${level}`;
+          }
+          if (footerData.getAvailableProviderCount() > 1 && model) {
+            const withProvider = `(${model.provider}) ${rightSide}`;
+            if (visibleWidth(statsLeft) + 2 + visibleWidth(withProvider) <= width) {
+              rightSide = withProvider;
+            }
+          }
+
+          // Bars
+          const statsVisible = visibleWidth(statsLeft);
+          const modelVisible = visibleWidth(rightSide);
+          const minGap = 2;
+          let barSpace = width - statsVisible - modelVisible - minGap * 2;
+          if (barSpace < 12) barSpace = 0;
+          const bars = barSpace > 0 ? renderFooterBars(theme, state.data, state.loading, barSpace) : "";
+          const barsVisible = visibleWidth(stripAnsi(bars));
+
+          let statsLine: string;
+          if (barsVisible > 0) {
+            const contentW = statsVisible + minGap + barsVisible + minGap + modelVisible;
+            if (contentW <= width) {
+              const gapLeft = Math.max(minGap, Math.floor((width - statsVisible - barsVisible - modelVisible) / 2));
+              const gapRight = width - statsVisible - barsVisible - modelVisible - gapLeft;
+              statsLine = statsLeft + " ".repeat(gapLeft) + bars + " ".repeat(gapRight) + rightSide;
+            } else {
+              const pad = " ".repeat(Math.max(minGap, width - statsVisible - modelVisible));
+              statsLine = statsLeft + pad + rightSide;
+            }
+          } else {
+            const pad = " ".repeat(Math.max(minGap, width - statsVisible - modelVisible));
+            statsLine = statsLeft + pad + rightSide;
+          }
+
+          const dimStatsLeft = theme.fg("dim", statsLeft);
+          const remainder = statsLine.slice(statsLeft.length);
+          const statsLineStyled = dimStatsLeft + theme.fg("dim", remainder);
+          const lines = [pwdLine, statsLineStyled];
+
+          // Extension statuses
+          const extensionStatuses = footerData.getExtensionStatuses();
+          if (extensionStatuses.size > 0) {
+            const sortedStatuses = Array.from(extensionStatuses.entries())
+              .sort(([a]: any, [b]: any) => String(a).localeCompare(String(b)))
+              .map(([, text]: any) => String(text).replace(/[\r\n\t]/g, " ").replace(/ +/g, " ").trim());
+            lines.push(truncateToWidth(sortedStatuses.join(" "), width, theme.fg("dim", "...")));
+          }
+          return lines;
+        },
+      };
+    });
+    footerActive = true;
+  }
+
+  function clearFooter(ctx: any) {
+    try { ctx?.ui?.setFooter(undefined); } catch (err) { logError("footer:clear", err); }
+    footerActive = false;
+    tuiRef = null;
+  }
+
+  // ─── UsageWidget (for /gobars detail view) ─────────────────────────────────
+
   class UsageWidget implements Component {
     private s: UsageState;
     private t: any;
@@ -215,42 +405,46 @@ export default function (pi: ExtensionAPI) {
     }
   }
 
-  function renderWidget() {
-    if (!uiCtx || !uiTheme) return;
-    uiCtx.setWidget(STATUS_KEY, () => new UsageWidget(state, uiTheme), { placement: "belowEditor" });
-  }
-
   // ─── Lifecycle ─────────────────────────────────────────────────────────────
 
   pi.on("session_start", async (_event, _ctx) => {
     try { uiCtx = _ctx.ui; uiTheme = _ctx.ui.theme; } catch (err) { logError("lifecycle:session_start", err); return; }
     if (!isGoModel(_ctx.model)) return;
-    renderWidget();
+    setupFooter(_ctx);
     await poll();
-    renderWidget();
+    tuiRef?.requestRender();
     if (pollTimer) clearInterval(pollTimer);
-    pollTimer = setInterval(() => { void poll().then(() => renderWidget()); }, POLL_INTERVAL_MS);
+    pollTimer = setInterval(() => { void poll().then(() => tuiRef?.requestRender()); }, POLL_INTERVAL_MS);
   });
 
   pi.on("turn_start", async (_event, _ctx) => {
     try { uiCtx = _ctx.ui; uiTheme = _ctx.ui.theme; } catch (err) { logError("lifecycle:turn_start", err); return; }
     if (!isGoModel(_ctx.model)) return;
-    renderWidget();
   });
 
   pi.on("model_select", async (_event, _ctx) => {
     try { uiCtx = _ctx.ui; uiTheme = _ctx.ui.theme; } catch (err) { logError("lifecycle:model_select", err); return; }
     if (!isGoModel(_event.model)) {
-      uiCtx?.setWidget(STATUS_KEY, undefined);
+      clearFooter(_ctx);
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
       return;
     }
-    if (!state.data || state.loading) await poll();
-    renderWidget();
+    if (!footerActive) {
+      setupFooter(_ctx);
+      if (!state.data || state.loading) await poll();
+      tuiRef?.requestRender();
+      if (pollTimer) clearInterval(pollTimer);
+      pollTimer = setInterval(() => { void poll().then(() => tuiRef?.requestRender()); }, POLL_INTERVAL_MS);
+    }
+  });
+
+  pi.on("thinking_level_select", async (_event, _ctx) => {
+    thinkingLevel = _event.level;
   });
 
   pi.on("session_shutdown", async (_event, _ctx) => {
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-    try { uiCtx?.setWidget(STATUS_KEY, undefined); } catch (err) { logError("lifecycle:session_shutdown", err); }
+    clearFooter(_ctx);
   });
 
   // ─── Commands ──────────────────────────────────────────────────────────────
@@ -266,7 +460,7 @@ export default function (pi: ExtensionAPI) {
         }
       } catch (err) { logError("command:gobars", err); }
       await poll();
-      renderWidget();
+      tuiRef?.requestRender();
     },
   });
 
@@ -284,7 +478,7 @@ export default function (pi: ExtensionAPI) {
   });
 }
 
-// ─── Detail UI Component ─────────────────────────────────────────────────
+// ─── Detail UI Component ─────────────────────────────────────────────────────
 
 function buildUsageDetail(theme: any, data: GoUsageData | null, done: () => void): Container & Focusable {
   const t = theme;
