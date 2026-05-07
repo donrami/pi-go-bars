@@ -52,6 +52,10 @@ function fgToBgAnsi(fgAnsi: string): string {
 const POLL_INTERVAL_MS = 30 * 1000;
 const STATUS_KEY = "pi-go-bars";
 
+function isGoModel(model: { provider: string } | undefined | null): boolean {
+  return model?.provider === "opencode-go";
+}
+
 interface UsageState {
   data: GoUsageData | null;
   loading: boolean;
@@ -220,6 +224,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, _ctx) => {
     try { uiCtx = _ctx.ui; uiTheme = _ctx.ui.theme; } catch (err) { logError("lifecycle:session_start", err); return; }
+    if (!isGoModel(_ctx.model)) return;
     renderWidget();
     await poll();
     renderWidget();
@@ -229,11 +234,16 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("turn_start", async (_event, _ctx) => {
     try { uiCtx = _ctx.ui; uiTheme = _ctx.ui.theme; } catch (err) { logError("lifecycle:turn_start", err); return; }
+    if (!isGoModel(_ctx.model)) return;
     renderWidget();
   });
 
   pi.on("model_select", async (_event, _ctx) => {
     try { uiCtx = _ctx.ui; uiTheme = _ctx.ui.theme; } catch (err) { logError("lifecycle:model_select", err); return; }
+    if (!isGoModel(_event.model)) {
+      uiCtx?.setWidget(STATUS_KEY, undefined);
+      return;
+    }
     if (!state.data || state.loading) await poll();
     renderWidget();
   });
