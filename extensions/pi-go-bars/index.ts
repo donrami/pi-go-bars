@@ -40,6 +40,7 @@ function fgToBgAnsi(fgAnsi: string): string {
 }
 
 const POLL_INTERVAL_MS = 30 * 1000;
+const STATUS_KEY = "pi-go-bars";
 
 function isGoModel(model: { provider: string } | undefined | null): boolean {
   return model?.provider === "opencode-go";
@@ -239,6 +240,8 @@ export default function (pi: ExtensionAPI) {
 
   function setupFooter(ctx: any) {
     if (!ctx.ui) return;
+    // Clear the old belowEditor widget so it doesn't render alongside the footer.
+    try { ctx.ui.setWidget(STATUS_KEY, undefined); } catch { /* ignore */ }
     ctx.ui.setFooter((tui: any, theme: any, footerData: any) => {
       tuiRef = tui;
       const unsub = footerData.onBranchChange(() => tui.requestRender());
@@ -356,6 +359,8 @@ export default function (pi: ExtensionAPI) {
 
   function clearFooter(ctx: any) {
     try { ctx?.ui?.setFooter(undefined); } catch (err) { logError("footer:clear", err); }
+    // Also clear the old widget to prevent orphaned bars on non-Go model switch.
+    try { ctx?.ui?.setWidget(STATUS_KEY, undefined); } catch { /* ignore */ }
     footerActive = false;
     tuiRef = null;
   }
@@ -445,6 +450,8 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_shutdown", async (_event, _ctx) => {
     if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
     clearFooter(_ctx);
+    // Belt-and-suspenders: ensure widget is also gone.
+    try { _ctx?.ui?.setWidget(STATUS_KEY, undefined); } catch { /* ignore */ }
   });
 
   // ─── Commands ──────────────────────────────────────────────────────────────
