@@ -12,7 +12,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as url from "node:url";
 
-import { parseBilling, parseDashboard, formatUsd, loadConfig } from "./core.ts";
+import { parseBilling, parseDashboard, formatUsd, loadConfig, discoverOpencodeKey, parseUsageApi } from "./core.ts";
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 const fixture = (name: string) =>
@@ -164,21 +164,43 @@ test("loadConfig: env OPENCODE_GO_SHOW_ZEN=1 opts in to Zen billing", () => {
   }
 });
 
-test("loadConfig: JSON showZen:true opts in", () => {
-  const tmp = path.join(__dirname, "testdata", "zen-enabled.json");
+// ─── Official usage API (dual-mode primary) ─────────────────────────────────
+
+test("discoverOpencodeKey: reads key from opencode auth.json", () => {
+  const tmp = path.join(__dirname, "testdata", "auth.json");
   fs.writeFileSync(tmp, JSON.stringify({
-    workspaceId: "wrk_TEST",
-    authCookie: "Fe26.2**test",
-    showZen: true,
+    "opencode-go": { type: "api", key: "sk-test-123" },
+    "anthropic": { type: "api", key: "sk-ant-other" },
   }));
   const saved = { ...process.env };
-  delete process.env.OPENCODE_GO_WORKSPACE_ID;
-  delete process.env.OPENCODE_GO_AUTH_COOKIE;
-  delete process.env.OPENCODE_GO_SHOW_ZEN;
+  process.env.OPENCODE_AUTH_JSON = tmp;
   try {
-    assert.equal(loadConfig(tmp)?.showZen, true);
+    assert.equal(discoverOpencodeKey(), "sk-test-123");
   } finally {
+    delete process.env.OPENCODE_AUTH_JSON;
     process.env = saved;
     fs.rmSync(tmp, { force: true });
   }
+});
+
+test("parseUsageApi: converts API response to GoUsageData windows", () => {
+  const data = parseUsageApi({
+    usage: {
+      rolling: { status: "ok", percent: 42, resetsAt: "2026-08-24T00:00:00.000Z" },
+      weekly: { status: "ok", percent: 60, resetsAt: "2026-08-25T00:00:00.000Z" },
+      monthly: { status: "rate-limited", percent: 100, resetsAt: "2026-08-30T00:00:00.000Z" },
+    },
+  });
+  assert.equal(data.rolling?.usagePercent, 42);
+  assert.equal(data.monthly?.usagePercent, 100);
+  assert.equal(typeof data.rolling?.resetInSec, "number");
+  assert.ok(data.rolling && data.rolling.resetInSec > 0);
+  assert.equal(data.error, undefined);
+});
+
+test("parseUsageApi: invalid response shape yields error, not throw", () => {
+  const data = parseUsageApi(null);
+  assert.match(data.error ?? "", /invalid response/);
+  const partial = parseUsageApi({ usage: {} });
+  assert.equal(partial.rolling, null);
 });

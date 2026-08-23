@@ -64,6 +64,12 @@ export interface GoBarsConfig {
   workspaceId: string;
   authCookie: string;
   /**
+   * Official opencode-go API key (from `opencode-go` in opencode's
+   * auth.json, or set explicitly). When present, usage comes from
+   * `GET /zen/go/v1/usage` instead of the dashboard scrape.
+   */
+  apiKey?: string;
+  /**
    * Opt-in: also scrape the workspace /billing page and render the Zen
    * pay-as-you-go balance + monthly spend segment. Default false so an
    * upgrade never changes behaviour for existing Go-only users.
@@ -96,6 +102,7 @@ export function loadEnvFile(filePath: string): GoBarsConfig | null {
     const lines = raw.split(/\r?\n/);
     let workspaceId = "";
     let authCookie = "";
+    let apiKey = "";
     let showZen = false;
 
     for (const line of lines) {
@@ -120,13 +127,18 @@ export function loadEnvFile(filePath: string): GoBarsConfig | null {
         workspaceId = value;
       } else if (key === "OPENCODE_GO_AUTH_COOKIE" && value) {
         authCookie = value;
+      } else if (key === "OPENCODE_GO_API_KEY" && value) {
+        apiKey = value;
       } else if (key === "OPENCODE_GO_SHOW_ZEN") {
         showZen = isTruthyFlag(value);
       }
     }
 
     if (workspaceId && authCookie) {
-      return { workspaceId, authCookie, showZen } as GoBarsConfig;
+      return { workspaceId, authCookie, apiKey: apiKey || undefined, showZen } as GoBarsConfig;
+    }
+    if (apiKey) {
+      return { workspaceId: "", authCookie: "", apiKey, showZen } as GoBarsConfig;
     }
   } catch (err) {
     logError("config:loadEnvFile", err);
@@ -139,13 +151,22 @@ export function loadEnvFile(filePath: string): GoBarsConfig | null {
  * Env vars always take priority when present.
  */
 export function loadConfig(configFile = DEFAULT_CONFIG_FILE): GoBarsConfig | null {
-  // 1) Environment variables (most secure)
   const envWs = process.env.OPENCODE_GO_WORKSPACE_ID?.trim();
   const envCookie = process.env.OPENCODE_GO_AUTH_COOKIE?.trim();
+  const envKey = process.env.OPENCODE_GO_API_KEY?.trim();
   if (envWs && envCookie) {
     return {
       workspaceId: envWs,
       authCookie: envCookie,
+      apiKey: envKey || undefined,
+      showZen: isTruthyFlag(process.env.OPENCODE_GO_SHOW_ZEN),
+    } as GoBarsConfig;
+  }
+  if (envKey) {
+    return {
+      workspaceId: "",
+      authCookie: "",
+      apiKey: envKey,
       showZen: isTruthyFlag(process.env.OPENCODE_GO_SHOW_ZEN),
     } as GoBarsConfig;
   }
@@ -160,9 +181,13 @@ export function loadConfig(configFile = DEFAULT_CONFIG_FILE): GoBarsConfig | nul
     const parsed = JSON.parse(raw) as Record<string, unknown>;
     const ws = isString(parsed.workspaceId) ? parsed.workspaceId.trim() : "";
     const cookie = isString(parsed.authCookie) ? parsed.authCookie.trim() : "";
+    const key = isString(parsed.apiKey) ? parsed.apiKey.trim() : "";
     if (ws && cookie) {
       const showZen = parsed.showZen === true;
-      return { workspaceId: ws, authCookie: cookie, showZen } as GoBarsConfig;
+      return { workspaceId: ws, authCookie: cookie, apiKey: key || undefined, showZen } as GoBarsConfig;
+    }
+    if (key) {
+      return { workspaceId: "", authCookie: "", apiKey: key, showZen: parsed.showZen === true } as GoBarsConfig;
     }
   } catch (err) {
     logError("config:loadJson", err);
@@ -266,10 +291,14 @@ function writeCache(data: GoUsageData): void {
 
 // ─── Fetch ───────────────────────────────────────────────────────────────────
 
-const DASHBOARD_URL = (workspaceId: string) =>
-  `https://opencode.ai/workspace/${workspaceId}/go`;
+const AUTH_JSON_CANDIDATES = [
+  ...(process.env.OPENCODE_AUTH_JSON ? [process.env.OPENCODE_AUTH_JSON] : []),
+  path.join(os.homedir(), ".local", "share", "opencode", "auth.json"),
+  path.join(os.homedir(), ".config", "opencode", "auth.json"),
+];
 const USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Gecko/20100101 Firefox/148.0";
+const USAGE_API_URL = "https://opencode.ai/zen/go/v1/usage";
 const SCRAPE_TIMEOUT_MS = 10_000;
 
 /** Regex for SolidJS SSR hydration output. Field order may vary. */
@@ -369,6 +398,89 @@ export async function fetchUsage(config: GoBarsConfig): Promise<GoUsageData> {
 
     const html = await resp.text();
     return parseDashboard(html);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// ─── Official usage API (dual-mode primary) ─────────────────────────────────
+
+/**
+ * Discover the opencode-go API key from opencode's own auth.json
+ * (`~/.local/share/opencode/auth.json`, `~/.config/opencode/auth.json`).
+ */
+export function discoverOpencodeKey(): string | null {
+  const envFile = process.env.OPENCODE_AUTH_JSON;
+  const candidates = envFile ? [envFile, ...AUTH_JSON_CANDIDATES] : AUTH_JSON_CANDIDATES;
+  for (const file of candidates) {
+    try {
+      const raw = fs.readFileSync(file, "utf-8");
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      const entry = parsed["opencode-go"];
+      if (entry && typeof entry === "object") {
+        const key = (entry as Record<string, unknown>).key;
+        if (typeof key === "string" && key.trim()) return key.trim();
+      }
+    } catch (err) {
+      logError("discover:authJson", err);
+    }
+  }
+  return null;
+}
+
+/**
+ * Parse the official usage API response:
+ * { usage: { rolling: {status,percent,resetsAt}, weekly, monthly } }.
+ * `resetsAt` is an ISO timestamp; converted to `resetInSec` to match the
+ * scrape path's shape so rendering code is shared.
+ */
+export function parseUsageApi(json: unknown): GoUsageData {
+  const empty: GoUsageData = { rolling: null, weekly: null, monthly: null, fetchedAt: Date.now() };
+  if (!json || typeof json !== "object") {
+    return { ...empty, error: "usage API returned an invalid response" };
+  }
+  const usage = (json as Record<string, unknown>).usage;
+  if (!usage || typeof usage !== "object") {
+    return { ...empty, error: "usage API response missing usage object" };
+  }
+
+  const toWindow = (w: unknown): GoUsageWindow | null => {
+    if (!w || typeof w !== "object") return null;
+    const rec = w as Record<string, unknown>;
+    const percent = typeof rec.percent === "number" ? rec.percent : Number.NaN;
+    const resetsAt = typeof rec.resetsAt === "string" ? rec.resetsAt : "";
+    if (!Number.isFinite(percent)) return null;
+    const resetInSec = resetsAt
+      ? Math.max(0, Math.round((Date.parse(resetsAt) - Date.now()) / 1000))
+      : 0;
+    return { usagePercent: Math.round(percent), resetInSec };
+  };
+
+  const u = usage as Record<string, unknown>;
+  const rolling = toWindow(u.rolling);
+  const weekly = toWindow(u.weekly);
+  const monthly = toWindow(u.monthly);
+  if (!rolling && !weekly && !monthly) {
+    return { ...empty, error: "usage API response missing usage windows" };
+  }
+  return { rolling, weekly, monthly, fetchedAt: Date.now() };
+}
+
+export async function fetchUsageApi(apiKey: string): Promise<GoUsageData> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), SCRAPE_TIMEOUT_MS);
+  try {
+    const resp = await fetch(USAGE_API_URL, {
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "User-Agent": USER_AGENT,
+      },
+      signal: controller.signal,
+    });
+    if (resp.status === 401) throw new Error("usage API: auth failed (401) — key invalid or expired");
+    if (resp.status === 403) throw new Error("usage API: not entitled (403) — no Go plan on this key");
+    if (!resp.ok) throw new Error(`usage API: HTTP ${resp.status} ${resp.statusText}`);
+    return parseUsageApi(await resp.json());
   } finally {
     clearTimeout(timer);
   }
@@ -604,6 +716,7 @@ export async function fetchBillingWithCache(): Promise<ZenBillingData | null> {
 // ─── Validation ──────────────────────────────────────────────────────────────
 
 function validateConfig(config: GoBarsConfig): string | null {
+  if (config.apiKey) return null;
   if (!/^wrk_[A-Za-z0-9]+$/.test(config.workspaceId)) {
     return `Invalid workspaceId format: expected "wrk_...", got "${config.workspaceId}"`;
   }
@@ -645,6 +758,32 @@ export async function fetchWithCache(): Promise<GoUsageData> {
   }
 
   try {
+    // Dual-mode: official API primary, legacy /go scrape fallback.
+    const apiKey = cfg.apiKey ?? discoverOpencodeKey();
+    if (apiKey) {
+      try {
+        const data = await fetchUsageApi(apiKey);
+        writeCache(data);
+        return data;
+      } catch (apiErr: unknown) {
+        const apiMsg = apiErr instanceof Error ? apiErr.message : String(apiErr);
+        // 401/403 are hard auth failures — no point falling back to the
+        // cookie scrape; surface the API error. Network/parse failures fall
+        // through to the legacy path.
+        if (/401|403/.test(apiMsg)) {
+          return { rolling: null, weekly: null, monthly: null, error: apiMsg };
+        }
+        logError("usage:apiFallback", apiErr);
+      }
+    }
+    if (!cfg.workspaceId || !cfg.authCookie) {
+      return {
+        rolling: null,
+        weekly: null,
+        monthly: null,
+        error: "usage API unavailable and no legacy workspace credentials configured",
+      };
+    }
     const data = await fetchUsage(cfg);
     writeCache(data);
     return data;

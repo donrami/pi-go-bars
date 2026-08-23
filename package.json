@@ -1,14 +1,17 @@
 {
   "name": "pi-go-bars",
-  "version": "0.3.0",
-  "description": "Opencode Go plan usage bars for pi — rolling, weekly, and monthly windows in the footer",
+  "version": "0.4.0",
+  "description": "Opencode Go plan usage bars for pi — rolling, weekly, and monthly windows in the footer, with optional Zen billing",
   "keywords": [
     "pi-package",
     "pi",
     "extension",
     "usage",
     "opencode",
-    "opencode-go"
+    "opencode-go",
+    "zen",
+    "billing",
+    "quota"
   ],
   "license": "MIT",
   "engines": {

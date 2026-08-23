@@ -1,7 +1,8 @@
 node_modules/
 .DS_Store
 *.tmp
-.env
+.env.*
+!.env.example
 tooling/
 AGENTS.md
 JOURNAL.md

@@ -5,8 +5,10 @@
  * centred in the footer between token stats and model info, via
  * ctx.ui.setFooter().  Bars scale dynamically to terminal width.
  *
- * Config: OPENCODE_GO_WORKSPACE_ID + OPENCODE_GO_AUTH_COOKIE env vars,
- * or ~/.pi/agent/pi-go-bars.json
+ * Auth (preferred): the opencode-go API key, auto-discovered from
+ * opencode's auth.json (or OPENCODE_GO_API_KEY) — usage comes from the
+ * official GET /zen/go/v1/usage endpoint. Falls back to the legacy
+ * workspace cookie scrape when no key is available.
  */
 
 import { type ExtensionAPI } from "@earendil-works/pi-coding-agent";
