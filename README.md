@@ -77,7 +77,7 @@ Then restart pi. Set `"showZen": true` to enable the Zen billing segment.
 
 ### Finding the legacy credentials (cookie fallback)
 
-Only needed when no API key is available:
+Only needed when no API key is available. For the optional Zen segment, these are required even with an API key (see the Zen section above).
 
 1. Open [https://opencode.ai](https://opencode.ai) and go to your Go workspace.
 2. **Workspace ID** — copy the `wrk_...` part from the URL: `https://opencode.ai/workspace/wrk_XXXXXXXXXXXXXXXX/go`.
@@ -108,7 +108,9 @@ Bar widths scale with the terminal (max 20 chars, min 3). On narrow terminals co
 
 ### Zen pay-as-you-go billing (optional)
 
-Off by default. Enable with `OPENCODE_GO_SHOW_ZEN=1` or `"showZen": true`. It reuses the same credentials and scrapes the workspace `/billing` page in parallel:
+Off by default. Enable with `OPENCODE_GO_SHOW_ZEN=1` or `"showZen": true`. It scrapes the workspace `/billing` page in parallel:
+
+> Note: the Zen balance has **no official API** — [opencode#44189](https://github.com/anomalyco/opencode/issues/44189) tracks exposing it. The segment always uses the **cookie fallback** (workspace ID + auth cookie), even when an API key is configured for Go usage. No cookie configured → no Zen segment.
 
 ```
 Go R ████42%██████ W ██████17%██████ M ████8%██████████   Zen $20.00 $0.00/$50.00
@@ -127,7 +129,7 @@ It shows the current balance and this month's spend / monthly limit. The spend f
 
 - **Display** — rendered through `ctx.ui.setFooter()`, centred between the token stats and the model name; hidden unless the active model is `opencode-go`.
 - **Data source** — primary: `GET https://opencode.ai/zen/go/v1/usage` with `Authorization: Bearer <key>` (see [opencode#16513](https://github.com/anomalyco/opencode/pull/16513)). Fallback: scrape of the Go dashboard (`https://opencode.ai/workspace/{id}/go`) when no key is configured. Both paths parse the same `rollingUsage` / `weeklyUsage` / `monthlyUsage` windows. On the API path, 401/403 surface directly (invalid or non-entitled key).
-- **Zen billing** — when enabled, the `/billing` page is scraped in parallel and parsed from its SolidJS hydration object (anchored on `customerID:"cus_..."` so a future component exposing its own `balance:` field can't false-match). `balance` and `monthlyUsage` are stored in 1e-8 USD ("microcents"), `monthlyLimit` / `reloadAmount` / `reloadTrigger` in whole USD; `parseBilling` normalises both.
+- **Zen billing** — when enabled, the `/billing` page is scraped in parallel (workspace cookie; the official usage API has no balance endpoint — [opencode#44189](https://github.com/anomalyco/opencode/issues/44189)) and parsed from its SolidJS hydration object (anchored on `customerID:"cus_..."` so a future component exposing its own `balance:` field can't false-match). `balance` and `monthlyUsage` are stored in 1e-8 USD ("microcents"), `monthlyLimit` / `reloadAmount` / `reloadTrigger` in whole USD; `parseBilling` normalises both.
 - **Polling** — every 30 seconds, with a 90-second cache TTL so most polls return cached data. Re-renders on poll ticks, `turn_start`, and `model_select`. Countdowns are computed from elapsed time on each render, so they stay live without extra requests.
 
 ## Troubleshooting
